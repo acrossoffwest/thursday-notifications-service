@@ -1,14 +1,38 @@
 version: '3'
 
 services:
-  notification-bot:
+  bot:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: telegram-notification-bot
+    container_name: telegram-reminder-bot
     restart: unless-stopped
+    depends_on:
+      - redis
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
+      - REDIS_URL=redis://redis:6379
+      - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-Europe/Moscow}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
     volumes:
       - ./logs:/app/logs
+    networks:
+      - bot-network
+
+  redis:
+    image: redis:alpine
+    container_name: telegram-reminder-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    networks:
+      - bot-network
+
+networks:
+  bot-network:
+    driver: bridge
+
+volumes:
+  redis-data:

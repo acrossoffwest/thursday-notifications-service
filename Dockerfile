@@ -11,9 +11,8 @@ RUN npm ci --only=production
 # Copy source code
 COPY src ./src
 
-# Environment variables (set default values here if needed)
-ENV TELEGRAM_BOT_TOKEN=""
-ENV TELEGRAM_CHAT_ID=""
+# Environment variables
+ENV NODE_ENV=production
 
 # Command to run the application
 CMD ["node", "src/index.js"]

@@ -1,5 +1,9 @@
 node_modules
-.idea
-Dockerfile
-logs
-docker-compose.yml
+npm-debug.log
+.git
+.gitignore
+.env
+.env.*
+README.md
+*.md
+logs/

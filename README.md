@@ -1,79 +1,81 @@
-# Notification Service
+# Intelligent Telegram Reminder Bot
 
-A Telegram bot that sends notifications every Thursday at 10 AM Moscow time.
+A smart Telegram bot that uses AI to understand natural language reminder requests and set up notifications accordingly.
+
+## Features
+
+- Natural language processing for reminder creation
+- Support for one-time, daily, weekly, and monthly reminders
+- Redis for persistent storage of reminders
+- OpenAI GPT integration for message understanding
 
 ## Prerequisites
 
+- Node.js 16+
 - Docker and Docker Compose
-- Telegram Bot Token
-- Telegram Chat ID
+- Telegram Bot Token (from BotFather)
+- OpenAI API Key
 
 ## Setup
 
-### 1. Telegram Bot Setup
+1. Clone the repository:
+   ```
+   git clone <repository-url>
+   cd notification-service
+   ```
 
-1. Talk to [@BotFather](https://t.me/BotFather) on Telegram
-2. Create a new bot with `/newbot`
-3. Copy the provided token
+2. Create `.env` file by copying `.env.example`:
+   ```
+   cp .env.example .env
+   ```
 
-### 2. Get Chat ID
+3. Fill in required credentials in the `.env` file:
+   - `TELEGRAM_BOT_TOKEN`: Your Telegram bot token from BotFather
+   - `OPENAI_API_KEY`: Your OpenAI API key
 
-1. Start a chat with your bot
-2. Send any message to it
-3. Visit `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates`
-4. Copy the `chat.id` value
+## Development
 
-### 3. Environment Configuration
+To run the bot in development mode:
 
-Copy `.env.example` to `.env` and update:
-
-```
-TELEGRAM_BOT_TOKEN=your_bot_token_here
-TELEGRAM_CHAT_ID=your_chat_id_here
+```bash
+npm install
+npm run dev
 ```
 
 ## Deployment
 
-```bash
-# Start the bot
-docker-compose up -d
+To deploy using Docker:
 
-# View logs
-docker-compose logs -f
+```bash
+docker-compose up -d
 ```
+
+## Usage
+
+Start a chat with your bot on Telegram and try these examples:
+
+- "Remind me to take my medication tomorrow at 8am"
+- "Set a reminder for weekly team meeting every Monday at 10am"
+- "Remind me to call mom every Sunday at 6pm"
+- "Set a reminder for dentist appointment on March 15, 2025 at 2:30pm"
+
+### Bot Commands
+
+- `/list` - Show all your active reminders
+- `/delete <id>` - Delete a specific reminder by ID
+- `/help` - Show help message with examples
 
 ## Project Structure
 
 ```
 notification-service/
 ├── src/
-│   └── index.js          # Main bot code
-├── logs/                 # Log directory
-├── .env                  # Environment variables
-├── .env.example          # Template for .env
-├── Dockerfile            # Docker configuration
-├── docker-compose.yml    # Docker Compose config
-├── package.json          # Node.js dependencies
-└── README.md             # This file
-```
-
-## Development
-
-```bash
-# Install dependencies
-npm install
-
-# Run locally
-npm run dev
-```
-
-## Customization
-
-To modify the notification schedule, edit the cron pattern in `src/index.js`:
-
-```javascript
-// Current: Thursdays at 10 AM Moscow time
-cron.schedule('0 10 * * 4', sendNotification, {
-  timezone: MOSCOW_TIMEZONE
-});
+│   ├── config/       # Configuration settings
+│   ├── services/     # Core services (OpenAI, Redis, Scheduler)
+│   ├── utils/        # Utility functions
+│   ├── handlers/     # Message handlers
+│   └── index.js      # Main application entry point
+├── Dockerfile        # Docker configuration
+├── docker-compose.yml # Docker Compose setup
+└── package.json      # Dependencies
 ```
