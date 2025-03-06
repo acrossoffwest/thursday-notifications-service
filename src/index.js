@@ -1,13 +1,17 @@
-// telegram-notification-bot.js
+// Telegram notification bot
 const { Telegraf } = require('telegraf');
 const cron = require('node-cron');
 const moment = require('moment-timezone');
 
-// Replace with your bot token from BotFather
-const BOT_TOKEN = 'YOUR_BOT_TOKEN';
+// Get bot token and chat ID from environment variables
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-// Replace with your chat ID
-const CHAT_ID = 'YOUR_CHAT_ID';
+// Check if required environment variables are set
+if (!BOT_TOKEN || !CHAT_ID) {
+    console.error('Error: Required environment variables TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set');
+    process.exit(1);
+}
 
 // Create bot instance
 const bot = new Telegraf(BOT_TOKEN);

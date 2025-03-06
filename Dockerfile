@@ -3,17 +3,17 @@ FROM node:18-alpine
 WORKDIR /app
 
 # Copy package files
-COPY package.json package-lock.json* ./
+COPY package*.json ./
 
 # Install dependencies
-RUN npm install
+RUN npm ci --only=production
 
 # Copy source code
-COPY telegram-notification-bot.js ./
+COPY src ./src
 
 # Environment variables (set default values here if needed)
 ENV TELEGRAM_BOT_TOKEN=""
 ENV TELEGRAM_CHAT_ID=""
 
 # Command to run the application
-CMD ["node", "telegram-notification-bot.js"]
+CMD ["node", "src/index.js"]
