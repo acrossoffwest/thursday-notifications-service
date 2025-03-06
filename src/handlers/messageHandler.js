@@ -97,6 +97,130 @@ async function getDateFromSchedule(schedule, userTimezone) {
   return reminderDate.toJSDate();
 }
 
+// Helper function to handle multiple days reminders
+async function handleMultipleDaysReminder(ctx, analysis, userTimezone) {
+  const userId = ctx.from.id.toString();
+  const reminderIds = [];
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+  // Create separate reminders for each day
+  for (const dayOfWeek of analysis.schedule.daysOfWeek) {
+    // Create a weekly schedule for this specific day
+    const singleDaySchedule = {
+      ...analysis.schedule,
+      frequency: 'weekly',
+      dayOfWeek: dayOfWeek
+    };
+
+    // Calculate next run
+    const now = DateTime.now().setZone(userTimezone);
+    const [hours, minutes] = analysis.schedule.time.split(':').map(Number);
+
+    let reminderDate = now.set({ hour: hours, minute: minutes, second: 0, millisecond: 0 });
+
+    // Calculate days until next occurrence
+    const currentDay = now.weekday % 7; // Convert to 0-6 format (0 = Sunday)
+    let daysUntil = (dayOfWeek - currentDay + 7) % 7;
+
+    // If same day but time passed, add a week
+    if (daysUntil === 0 && reminderDate <= now) {
+      daysUntil = 7;
+    }
+
+    reminderDate = reminderDate.plus({ days: daysUntil });
+
+    // Create reminder object
+    const reminder = {
+      message: analysis.message,
+      schedule: singleDaySchedule,
+      nextRun: reminderDate.toJSDate().toISOString(),
+      createdAt: new Date().toISOString(),
+      timezone: userTimezone
+    };
+
+    // Save to Redis
+    const reminderId = await saveReminder(userId, reminder);
+    reminderIds.push({ id: reminderId, day: days[dayOfWeek], nextRun: reminderDate });
+  }
+
+  // Format confirmation message
+  let confirmationMsg = `✅ Reminder set: "${analysis.message}"\n`;
+
+  // List days
+  const dayNames = analysis.schedule.daysOfWeek.map(d => days[d]).join(' and ');
+  confirmationMsg += `📆 Every ${dayNames} at ${analysis.schedule.time}\n\n`;
+
+  // List individual reminders
+  confirmationMsg += `Reminders created:\n`;
+
+  for (const reminder of reminderIds) {
+    confirmationMsg += `• ${reminder.day}: ID ${reminder.id}\n`;
+    confirmationMsg += `  Next: ${reminder.nextRun.toLocaleString(DateTime.DATETIME_SHORT)}\n`;
+  }
+
+  confirmationMsg += `\nTimezone: ${userTimezone}`;
+
+  // Send confirmation
+  await ctx.reply(confirmationMsg);
+  logger.info(`Created ${reminderIds.length} reminders for days: ${dayNames}`);
+}
+
+// Helper function to detect timezone from message
+async function detectTimezone(message, userId) {
+  try {
+    const openai = require('../services/openai').openai;
+    const response = await openai.chat.completions.create({
+      model: config.OPENAI_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content: `
+          You are a multilingual timezone detection assistant. Extract location or timezone information from the message in any language.
+          
+          If the message explicitly mentions a timezone or city/location, determine the IANA timezone.
+          
+          For example:
+          - "по варшавскому времени" should be detected as "Europe/Warsaw"
+          - "remind me at 5pm Berlin time" should be detected as "Europe/Berlin"
+          - "Tokyo time" should be detected as "Asia/Tokyo"
+          
+          Return your response as JSON with the following structure:
+          {
+            "hasTimezoneInfo": boolean, // true if the message contains timezone information
+            "location": string, // the detected location (city, country, etc.)
+            "timezone": string, // the IANA timezone string (e.g., "Europe/Moscow", "America/New_York")
+            "confidence": number // 0-1 value indicating confidence in the timezone detection
+          }
+          
+          If no timezone or location is mentioned, set hasTimezoneInfo to false and other fields to null.
+          Only return valid IANA timezone strings for the timezone field.
+          `
+        },
+        {
+          role: 'user',
+          content: message
+        }
+      ],
+      temperature: 0,
+      response_format: { type: 'json_object' }
+    });
+
+    const result = JSON.parse(response.choices[0].message.content);
+    logger.debug('Timezone detection result:', result);
+
+    if (result.hasTimezoneInfo && result.timezone && result.confidence > 0.7) {
+      // Save the timezone
+      await saveUserTimezone(userId, result.timezone);
+      return result.timezone;
+    }
+
+    return null;
+  } catch (error) {
+    logger.error('Error detecting timezone:', error);
+    return null;
+  }
+}
+
 /**
  * Handles incoming user messages
  */
@@ -166,6 +290,12 @@ const messageHandler = Composer.on('text', async (ctx) => {
       // Already saved in detectTimezone
     } else {
       userTimezone = await getUserTimezone(userId);
+    }
+
+    // Handle multiple days scenario if needed
+    if (analysis.schedule.frequency === 'multiple_days') {
+      await handleMultipleDaysReminder(ctx, analysis, userTimezone);
+      return;
     }
 
     // Create reminder object
@@ -250,62 +380,7 @@ const messageHandler = Composer.on('text', async (ctx) => {
   }
 });
 
-// Helper function to detect timezone from message
-async function detectTimezone(message, userId) {
-  try {
-    const openai = require('../services/openai').openai;
-    const response = await openai.chat.completions.create({
-      model: config.OPENAI_MODEL,
-      messages: [
-        {
-          role: 'system',
-          content: `
-          You are a multilingual timezone detection assistant. Extract location or timezone information from the message in any language.
-          
-          If the message explicitly mentions a timezone or city/location, determine the IANA timezone.
-          
-          For example:
-          - "по варшавскому времени" should be detected as "Europe/Warsaw"
-          - "remind me at 5pm Berlin time" should be detected as "Europe/Berlin"
-          - "Tokyo time" should be detected as "Asia/Tokyo"
-          
-          Return your response as JSON with the following structure:
-          {
-            "hasTimezoneInfo": boolean, // true if the message contains timezone information
-            "location": string, // the detected location (city, country, etc.)
-            "timezone": string, // the IANA timezone string (e.g., "Europe/Moscow", "America/New_York")
-            "confidence": number // 0-1 value indicating confidence in the timezone detection
-          }
-          
-          If no timezone or location is mentioned, set hasTimezoneInfo to false and other fields to null.
-          Only return valid IANA timezone strings for the timezone field.
-          `
-        },
-        {
-          role: 'user',
-          content: message
-        }
-      ],
-      temperature: 0,
-      response_format: { type: 'json_object' }
-    });
-
-    const result = JSON.parse(response.choices[0].message.content);
-    logger.debug('Timezone detection result:', result);
-
-    if (result.hasTimezoneInfo && result.timezone && result.confidence > 0.7) {
-      // Save the timezone
-      await saveUserTimezone(userId, result.timezone);
-      return result.timezone;
-    }
-
-    return null;
-  } catch (error) {
-    logger.error('Error detecting timezone:', error);
-    return null;
-  }
-}
-
 module.exports = {
-  messageHandler
+  messageHandler,
+  detectTimezone
 };

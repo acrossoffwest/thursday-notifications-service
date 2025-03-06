@@ -68,7 +68,6 @@ async function detectTimezone(message, userId) {
   }
 }
 
-// Enhanced reminder analysis for multilingual support
 async function analyzeMessage(message, userId) {
   try {
     // First, check if there's timezone information
@@ -86,8 +85,9 @@ async function analyzeMessage(message, userId) {
           - isReminder (boolean): true if the message is asking to set a reminder
           - message (string): what the user wants to be reminded about (in the original language)
           - schedule (object):
-            - frequency: "once", "daily", "weekly", "monthly"
+            - frequency: "once", "daily", "weekly", "monthly", or "multiple_days"
             - dayOfWeek: (number, 0-6, 0 is Sunday) if weekly
+            - daysOfWeek: (array of numbers, 0-6, 0 is Sunday) if multiple_days
             - dayOfMonth: (number, 1-31) if monthly
             - time: (string in HH:MM format, always in 24-hour format)
             - date: (string in YYYY-MM-DD format) if once
@@ -95,6 +95,8 @@ async function analyzeMessage(message, userId) {
             - relativeMinutes: (number) if isRelativeTime is true, the number of minutes from now
 
           IMPORTANT:
+          - If the reminder is for multiple specific days (e.g., "every Monday and Wednesday"), 
+            set frequency to "multiple_days" and include an array of day numbers in daysOfWeek.
           - If the time is relative (e.g., "in 30 minutes"), set isRelativeTime to true and calculate relativeMinutes.
           - If the time is in a specific timezone ("at 8pm Warsaw time"), extract the base time without timezone adjustment.
           - Always return time in 24-hour format (e.g., "22:30" not "10:30 PM").
