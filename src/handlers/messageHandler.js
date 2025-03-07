@@ -224,9 +224,11 @@ async function detectTimezone(message, userId) {
 /**
  * Handles incoming user messages
  */
-const messageHandler = Composer.on('text', async (ctx) => {
+const messageHandler = async (ctx) => {
   const messageText = ctx.message.text;
   const userId = ctx.from.id.toString();
+
+  logger.info(`Received message from user ${userId}: ${messageText}`);
 
   // Skip handling commands
   if (messageText.startsWith('/')) {
@@ -378,7 +380,7 @@ const messageHandler = Composer.on('text', async (ctx) => {
     logger.error('Error handling message:', error);
     await ctx.reply("I'm having trouble understanding that request. Could you try again with a clearer reminder format?");
   }
-});
+};
 
 module.exports = {
   messageHandler,
