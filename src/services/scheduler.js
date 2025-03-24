@@ -111,11 +111,11 @@ async function setupScheduler(bot) {
     try {
       const dueReminders = await getDueReminders();
 
-      for (const { userId, reminderId, reminder } of dueReminders) {
+      for (const { chatId, reminderId, reminder } of dueReminders) {
         try {
           // Generate a unique key for this reminder occurrence
           const currentTime = Date.now();
-          const reminderKey = `${userId}:${reminderId}:${Math.floor(currentTime / 60000)}`; // Round to minute
+          const reminderKey = `${chatId}:${reminderId}:${Math.floor(currentTime / 60000)}`; // Round to minute
 
           // Skip if already processed in the last minute
           if (processedReminders.has(reminderKey)) {
@@ -132,26 +132,26 @@ async function setupScheduler(bot) {
             }
           }
 
-          // Format the reminder time in user's timezone
-          const userTimezone = reminder.timezone || await getUserTimezone(userId);
+          // Format the reminder time in chat's timezone
+          const chatTimezone = reminder.timezone || await getUserTimezone(chatId);
           const reminderTime = DateTime.fromJSDate(new Date(reminder.nextRun))
-              .setZone(userTimezone)
+              .setZone(chatTimezone)
               .toLocaleString(DateTime.TIME_SIMPLE);
 
           // Send the reminder with properly formatted time
-          await bot.telegram.sendMessage(userId, `⏰ Reminder: ${reminder.message}`);
-          logger.info(`Sent reminder ${reminderId} to user ${userId} at ${reminderTime} (${userTimezone})`);
+          await bot.telegram.sendMessage(chatId, `⏰ Reminder: ${reminder.message}`);
+          logger.info(`Sent reminder ${reminderId} to chat ${chatId} at ${reminderTime} (${chatTimezone})`);
 
           // Calculate next run time
           const nextRun = calculateNextRun(reminder);
 
           if (nextRun) {
             // Update reminder with new next run time
-            await updateReminderNextRun(userId, reminderId, nextRun, userTimezone);
+            await updateReminderNextRun(chatId, reminderId, nextRun, chatTimezone);
             logger.info(`Rescheduled reminder ${reminderId} for ${nextRun}`);
           } else {
             // Delete one-time reminder that's completed
-            await deleteReminder(userId, reminderId);
+            await deleteReminder(chatId, reminderId);
             logger.info(`Deleted one-time reminder ${reminderId}`);
           }
         } catch (error) {

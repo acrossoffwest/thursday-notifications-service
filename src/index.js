@@ -32,12 +32,19 @@ const bot = new Telegraf(config.TELEGRAM_BOT_TOKEN);
   }
 })();
 
-bot.command('start', (ctx) => {
+bot.command('start', async (ctx) => {
   const firstName = ctx.from.first_name || 'there';
+  const chatId = ctx.chat.id.toString();
+
+  // Check if timezone is set for this chat
+  const chatTimezone = await getUserTimezone(chatId);
+  const timezoneMessage = chatTimezone === config.USER_TIMEZONE_DEFAULT
+    ? "\n⚠️ IMPORTANT: Please set your timezone first using /timezone or /timezone_detect command."
+    : `\n✅ Your timezone is set to: ${chatTimezone}`;
 
   ctx.reply(
       `Hello ${firstName}! 👋\n\n` +
-      `I'm your personal reminder assistant powered by AI. I can understand natural language requests to set reminders.\n\n` +
+      `I'm your personal reminder assistant powered by AI. I can understand natural language requests to set reminders.${timezoneMessage}\n\n` +
       `Try saying something like:\n` +
       `• "Remind me to call Alex tomorrow at 3pm"\n` +
       `• "Set a reminder for gym every Monday and Wednesday at 6pm"\n` +
@@ -46,6 +53,7 @@ bot.command('start', (ctx) => {
       `/list - View all your active reminders\n` +
       `/delete [id] - Delete a specific reminder\n` +
       `/timezone - Set your timezone\n` +
+      `/timezone_detect - Detect your timezone from location\n` +
       `/help - Show more example commands\n\n` +
       `What would you like me to remind you about?`
   );
@@ -53,8 +61,8 @@ bot.command('start', (ctx) => {
 
 bot.command('list', async (ctx) => {
   try {
-    const userId = ctx.from.id.toString();
-    const reminders = await redisClient.hGetAll(`reminders:${userId}`);
+    const chatId = ctx.chat.id.toString();
+    const reminders = await redisClient.hGetAll(`reminders:${chatId}`);
 
     if (!reminders || Object.keys(reminders).length === 0) {
       return ctx.reply('You have no active reminders.');
@@ -111,14 +119,14 @@ bot.command('list', async (ctx) => {
 bot.action(/delete_(.+)/, async (ctx) => {
   try {
     const reminderId = ctx.match[1];
-    const userId = ctx.from.id.toString();
+    const chatId = ctx.chat.id.toString();
 
     // Delete the reminder
-    const deleted = await redisClient.hDel(`reminders:${userId}`, reminderId);
+    const deleted = await redisClient.hDel(`reminders:${chatId}`, reminderId);
 
     if (deleted) {
       // Also remove from scheduler
-      await redisClient.zRem('reminder_schedule', `${userId}:${reminderId}`);
+      await redisClient.zRem('reminder_schedule', `${chatId}:${reminderId}`);
 
       // Update the message to show it's deleted
       await ctx.editMessageText(`✅ Reminder deleted successfully!`);
@@ -139,15 +147,15 @@ bot.command('delete', async (ctx) => {
   }
 
   try {
-    const userId = ctx.from.id.toString();
-    const exists = await redisClient.hExists(`reminders:${userId}`, reminderId);
+    const chatId = ctx.chat.id.toString();
+    const exists = await redisClient.hExists(`reminders:${chatId}`, reminderId);
 
     if (!exists) {
       return ctx.reply(`Reminder with ID ${reminderId} not found.`);
     }
 
-    await redisClient.hDel(`reminders:${userId}`, reminderId);
-    await redisClient.zRem('reminder_schedule', `${userId}:${reminderId}`);
+    await redisClient.hDel(`reminders:${chatId}`, reminderId);
+    await redisClient.zRem('reminder_schedule', `${chatId}:${reminderId}`);
     ctx.reply(`Reminder ${reminderId} deleted successfully.`);
   } catch (error) {
     logger.error('Error deleting reminder:', error);
@@ -155,9 +163,15 @@ bot.command('delete', async (ctx) => {
   }
 });
 
-bot.command('help', (ctx) => {
+bot.command('help', async (ctx) => {
+  const chatId = ctx.chat.id.toString();
+  const chatTimezone = await getUserTimezone(chatId);
+  const timezoneMessage = chatTimezone === config.USER_TIMEZONE_DEFAULT
+    ? "\n⚠️ IMPORTANT: Please set your timezone first using /timezone or /timezone_detect command."
+    : `\n✅ Your timezone is set to: ${chatTimezone}`;
+
   ctx.reply(
-      'I can help you set reminders using natural language.\n\n' +
+      'I can help you set reminders using natural language.' + timezoneMessage + '\n\n' +
       'Examples:\n' +
       '• "Remind me to take medicine every day at 9am"\n' +
       '• "Set a reminder for team meeting every Thursday at 3pm"\n' +
@@ -168,7 +182,8 @@ bot.command('help', (ctx) => {
       '/timezone - Set your timezone\n' +
       '/timezone_detect - Detect your timezone from location\n' +
       '/mytimezone - Check your current timezone\n' +
-      '/help - Show this help message'
+      '/help - Show this help message\n\n' +
+      'Note: Timezone is shared for all users in this chat to ensure consistent reminder times.'
   );
 });
 
@@ -176,7 +191,7 @@ bot.command('help', (ctx) => {
 bot.command('timezone', async (ctx) => {
   const messageText = ctx.message.text.trim();
   const args = messageText.split(' ');
-  const userId = ctx.from.id.toString();
+  const chatId = ctx.chat.id.toString();
 
   if (args.length < 2) {
     return ctx.reply(
@@ -201,24 +216,24 @@ bot.command('timezone', async (ctx) => {
     }
 
     // Save the timezone
-    await saveUserTimezone(userId, timezone);
+    await saveUserTimezone(chatId, timezone);
     const localTime = testDate.toFormat('yyyy-MM-dd HH:mm:ss');
     ctx.reply(`✅ Your timezone has been set to ${timezone}.\nYour local time should be: ${localTime}`);
   } catch (error) {
-    logger.error(`Error setting timezone for user ${userId}:`, error);
+    logger.error(`Error setting timezone for chat ${chatId}:`, error);
     ctx.reply('Sorry, I could not set your timezone. Please try again.');
   }
 });
 
 // Timezone detection command
 bot.command('timezone_detect', async (ctx) => {
-  const userId = ctx.from.id.toString();
+  const chatId = ctx.chat.id.toString();
 
   try {
     await ctx.reply('Please tell me your location so I can detect your timezone. For example: "I live in Warsaw, Poland" or "My timezone is Tokyo time"');
 
     // Setting a flag in Redis to mark we're expecting a timezone response
-    await redisClient.set(`user:${userId}:expecting_timezone`, 'true', {
+    await redisClient.set(`chat:${chatId}:expecting_timezone`, 'true', {
       EX: 300 // Expire after 5 minutes if no response
     });
 
@@ -230,14 +245,14 @@ bot.command('timezone_detect', async (ctx) => {
 
 // My timezone command
 bot.command('mytimezone', async (ctx) => {
-  const userId = ctx.from.id.toString();
+  const chatId = ctx.chat.id.toString();
   try {
-    const timezone = await getUserTimezone(userId);
+    const timezone = await getUserTimezone(chatId);
     const localTime = DateTime.now().setZone(timezone).toFormat('yyyy-MM-dd HH:mm:ss');
 
     ctx.reply(`Your current timezone is set to: ${timezone}\nYour local time should be: ${localTime}`);
   } catch (error) {
-    logger.error(`Error getting timezone for user ${userId}:`, error);
+    logger.error(`Error getting timezone for chat ${chatId}:`, error);
     ctx.reply('I could not retrieve your timezone. Please try setting it with the /timezone command.');
   }
 });
@@ -245,12 +260,12 @@ bot.command('mytimezone', async (ctx) => {
 // Handle callbacks for timezone updates
 bot.action(/update_tz_(.+)/, async (ctx) => {
   const action = ctx.match[1];
-  const userId = ctx.from.id.toString();
+  const chatId = ctx.chat.id.toString();
 
   if (action === 'all') {
     try {
-      const userTimezone = await getUserTimezone(userId);
-      const reminders = await redisClient.hGetAll(`reminders:${userId}`);
+      const chatTimezone = await getUserTimezone(chatId);
+      const reminders = await redisClient.hGetAll(`reminders:${chatId}`);
 
       let updatedCount = 0;
 
@@ -258,7 +273,7 @@ bot.action(/update_tz_(.+)/, async (ctx) => {
         const reminder = JSON.parse(reminderJson);
 
         // Update the timezone
-        reminder.timezone = userTimezone;
+        reminder.timezone = chatTimezone;
 
         // Recalculate next run
         const nextRun = calculateNextRun(reminder);
@@ -267,20 +282,20 @@ bot.action(/update_tz_(.+)/, async (ctx) => {
           reminder.nextRun = nextRun.toISOString();
 
           // Save updated reminder
-          await redisClient.hSet(`reminders:${userId}`, reminderId, JSON.stringify(reminder));
+          await redisClient.hSet(`reminders:${chatId}`, reminderId, JSON.stringify(reminder));
 
           // Update in sorted set
-          await redisClient.zRem('reminder_schedule', `${userId}:${reminderId}`);
+          await redisClient.zRem('reminder_schedule', `${chatId}:${reminderId}`);
           await redisClient.zAdd('reminder_schedule', {
             score: new Date(nextRun).getTime(),
-            value: `${userId}:${reminderId}`
+            value: `${chatId}:${reminderId}`
           });
 
           updatedCount++;
         }
       }
 
-      await ctx.editMessageText(`✅ Updated ${updatedCount} reminders to use your timezone (${userTimezone}).`);
+      await ctx.editMessageText(`✅ Updated ${updatedCount} reminders to use your timezone (${chatTimezone}).`);
     } catch (error) {
       logger.error('Error updating reminders timezone:', error);
       await ctx.editMessageText('Sorry, I encountered an error updating your reminders.');
@@ -294,7 +309,7 @@ bot.action(/update_tz_(.+)/, async (ctx) => {
 bot.action(/reschedule_(.+)/, async (ctx) => {
   try {
     const rescheduleKey = ctx.match[1];
-    const userId = ctx.from.id.toString();
+    const chatId = ctx.chat.id.toString();
 
     // Get stored data
     const reminderDataJson = await redisClient.get(rescheduleKey);
@@ -303,10 +318,10 @@ bot.action(/reschedule_(.+)/, async (ctx) => {
     }
 
     const reminderData = JSON.parse(reminderDataJson);
-    const userTimezone = await getUserTimezone(userId);
+    const chatTimezone = await getUserTimezone(chatId);
 
     // Create tomorrow's date
-    const tomorrow = DateTime.now().setZone(userTimezone).plus({ days: 1 });
+    const tomorrow = DateTime.now().setZone(chatTimezone).plus({ days: 1 });
     const [hours, minutes] = reminderData.time.split(':').map(Number);
 
     const reminderDate = tomorrow.set({
@@ -326,11 +341,11 @@ bot.action(/reschedule_(.+)/, async (ctx) => {
       },
       nextRun: reminderDate.toJSDate().toISOString(),
       createdAt: new Date().toISOString(),
-      timezone: userTimezone
+      timezone: chatTimezone
     };
 
     // Save to Redis
-    const reminderId = await saveReminder(userId, reminder);
+    const reminderId = await saveReminder(chatId, reminder);
 
     // Clean up temporary data
     await redisClient.del(rescheduleKey);
@@ -341,7 +356,7 @@ bot.action(/reschedule_(.+)/, async (ctx) => {
         `⏰ Time: ${reminderDate.toLocaleString(DateTime.TIME_SIMPLE)}\n\n` +
         `Next reminder: ${reminderDate.toLocaleString(DateTime.DATETIME_FULL)}\n` +
         `Reminder ID: ${reminderId}\n` +
-        `Timezone: ${userTimezone}`;
+        `Timezone: ${chatTimezone}`;
 
     await ctx.editMessageText(confirmationMsg);
 
@@ -357,7 +372,7 @@ bot.action('cancel_reminder', async (ctx) => {
 
 // Handle voice messages
 bot.on(['voice', 'audio'], async (ctx) => {
-  const userId = ctx.from.id.toString();
+  const chatId = ctx.chat.id.toString();
 
   try {
     // Send a typing indicator while processing
@@ -371,7 +386,7 @@ bot.on(['voice', 'audio'], async (ctx) => {
     const fileUrl = `https://api.telegram.org/file/bot${config.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`;
 
     // Transcribe voice message
-    const transcribedText = await transcribeVoiceMessage(fileUrl, userId);
+    const transcribedText = await transcribeVoiceMessage(fileUrl, chatId);
 
     // First, respond with the transcription
     await ctx.reply(`🎤 I heard: "${transcribedText}"`);

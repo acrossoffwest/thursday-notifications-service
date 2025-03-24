@@ -7,16 +7,16 @@ module.exports = {
 
   // OpenAI
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
-  OPENAI_MODEL: process.env.OPENAI_MODEL || 'gpt-4o',
+  OPENAI_MODEL: process.env.OPENAI_MODEL || 'gpt-4o-mini',
 
   // Redis
-  REDIS_URL: process.env.REDIS_URL || 'redis://redis:6379',
+  REDIS_URL: process.env.REDIS_URL || 'redis://localhost:6379',
 
   // Scheduler settings
-  SCHEDULER_CHECK_INTERVAL: parseInt(process.env.SCHEDULER_CHECK_INTERVAL || '60000', 10), // 1 minute
+  SCHEDULER_CHECK_INTERVAL: parseInt(process.env.SCHEDULER_CHECK_INTERVAL) || 60000, // 1 minute
 
   // Timezone
-  DEFAULT_TIMEZONE: process.env.DEFAULT_TIMEZONE || 'Europe/Moscow',
+  DEFAULT_TIMEZONE: process.env.DEFAULT_TIMEZONE || 'UTC',
 
   // Logging
   LOG_LEVEL: process.env.LOG_LEVEL || 'info'

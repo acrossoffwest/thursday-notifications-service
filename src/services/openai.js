@@ -1,7 +1,8 @@
 // OpenAI integration service
-const OpenAI = require('openai');
+const { OpenAI } = require('openai');
 const config = require('../config');
 const logger = require('../utils/logger');
+const { DateTime } = require('luxon');
 const {saveUserTimezone} = require("./redis");
 
 const openai = new OpenAI({
@@ -9,39 +10,44 @@ const openai = new OpenAI({
 });
 
 /**
- * Detects user's timezone from location information
- * @param {string} message - User message text
- * @param {string} userId - Telegram user ID
- * @returns {Promise<string|null>} - Detected timezone or null
+ * Analyzes a message to detect reminder details
+ * @param {string} message - User message
+ * @param {string} chatId - Chat ID
+ * @returns {Promise<Object>} - Analyzed reminder details
  */
-async function detectTimezone(message, userId) {
+async function analyzeMessage(message, chatId) {
   try {
+    logger.info(`Analyzing message with OpenAI: "${message}"`);
+    
     const response = await openai.chat.completions.create({
       model: config.OPENAI_MODEL,
       messages: [
         {
           role: 'system',
-          content: `
-          You are a multilingual timezone detection assistant. Extract location or timezone information from the message in any language.
-          
-          If the message explicitly mentions a timezone or city/location, determine the IANA timezone.
-          
-          For example:
-          - "по варшавскому времени" should be detected as "Europe/Warsaw"
-          - "remind me at 5pm Berlin time" should be detected as "Europe/Berlin"
-          - "Tokyo time" should be detected as "Asia/Tokyo"
-          
-          Return your response as JSON with the following structure:
-          {
-            "hasTimezoneInfo": boolean, // true if the message contains timezone information
-            "location": string, // the detected location (city, country, etc.)
-            "timezone": string, // the IANA timezone string (e.g., "Europe/Moscow", "America/New_York")
-            "confidence": number // 0-1 value indicating confidence in the timezone detection
-          }
-          
-          If no timezone or location is mentioned, set hasTimezoneInfo to false and other fields to null.
-          Only return valid IANA timezone strings for the timezone field.
-          `
+          content: `You are a reminder analysis assistant. Your task is to analyze messages and extract reminder details.
+            If the message contains a reminder request, return a JSON object with the following structure:
+            {
+              "isReminder": true,
+              "message": "the reminder message",
+              "schedule": {
+                "frequency": "once|daily|weekly|monthly|multiple_days",
+                "time": "HH:mm",
+                "date": "YYYY-MM-DD" (for once),
+                "dayOfWeek": 0-6 (for weekly, Sunday=0),
+                "daysOfWeek": [0-6] (for multiple_days),
+                "dayOfMonth": 1-31 (for monthly),
+                "isRelative": false,
+                "relativeMinutes": null
+              }
+            }
+            If not a reminder request, return { "isReminder": false }
+            For relative times like "in 5 minutes" or "after 2 hours":
+            - Set isRelative to true
+            - Set relativeMinutes to the number of minutes (e.g. 5 for "5 minutes", 120 for "2 hours")
+            - Set frequency to "once"
+            - Do not set time or date fields
+            For recurring reminders without a specific date, set appropriate frequency and time.
+            Time should always be in 24-hour format (HH:mm).`
         },
         {
           role: 'user',
@@ -49,95 +55,86 @@ async function detectTimezone(message, userId) {
         }
       ],
       temperature: 0,
-      response_format: { type: 'json_object' }
+      max_tokens: 500,
+      response_format: { type: "json_object" }
     });
 
     const result = JSON.parse(response.choices[0].message.content);
-    logger.debug('Timezone detection result:', result);
-
-    if (result.hasTimezoneInfo && result.timezone && result.confidence > 0.7) {
-      // Save the timezone
-      await saveUserTimezone(userId, result.timezone);
-      return result.timezone;
-    }
-
-    return null;
-  } catch (error) {
-    logger.error('Error detecting timezone:', error);
-    return null;
-  }
-}
-
-async function analyzeMessage(message, userId) {
-  try {
-    // First, check if there's timezone information
-    const detectedTimezone = await detectTimezone(message, userId);
-
-    // Proceed with normal reminder analysis
-    const response = await openai.chat.completions.create({
-      model: config.OPENAI_MODEL,
-      messages: [
-        {
-          role: 'system',
-          content: `
-          You are a multilingual reminder extraction assistant. Your task is to analyze if a message in any language contains a reminder request.
-          If it does, extract the following information in JSON format:
-          - isReminder (boolean): true if the message is asking to set a reminder
-          - message (string): what the user wants to be reminded about (in the original language)
-          - schedule (object):
-            - frequency: "once", "daily", "weekly", "monthly", or "multiple_days"
-            - dayOfWeek: (number, 0-6, 0 is Sunday) if weekly
-            - daysOfWeek: (array of numbers, 0-6, 0 is Sunday) if multiple_days
-            - dayOfMonth: (number, 1-31) if monthly
-            - time: (string in HH:MM format, always in 24-hour format)
-            - date: (string in YYYY-MM-DD format) if once
-            - isRelativeTime: (boolean) true if the time was specified as relative ("in X minutes/hours")
-            - relativeMinutes: (number) if isRelativeTime is true, the number of minutes from now
-
-          IMPORTANT:
-          - If the reminder is for multiple specific days (e.g., "every Monday and Wednesday"), 
-            set frequency to "multiple_days" and include an array of day numbers in daysOfWeek.
-          - If the time is relative (e.g., "in 30 minutes"), set isRelativeTime to true and calculate relativeMinutes.
-          - If the time is in a specific timezone ("at 8pm Warsaw time"), extract the base time without timezone adjustment.
-          - Always return time in 24-hour format (e.g., "22:30" not "10:30 PM").
-          - If the message is not a reminder request, return { "isReminder": false }.
-          `
-        },
-        {
-          role: 'user',
-          content: message
-        }
-      ],
-      temperature: 0,
-      response_format: { type: 'json_object' }
-    });
-
-    const result = JSON.parse(response.choices[0].message.content);
-    logger.debug('OpenAI analysis result:', result);
-
-    // If we detected a timezone, add it to the result object
-    if (detectedTimezone) {
-      result.detectedTimezone = detectedTimezone;
-    }
+    logger.info('OpenAI analysis result:', JSON.stringify(result, null, 2));
 
     // Handle relative time if present
-    if (result.isReminder && result.schedule.isRelativeTime) {
-      const now = new Date();
-      now.setMinutes(now.getMinutes() + result.schedule.relativeMinutes);
+    if (result.isReminder && result.schedule.isRelative && result.schedule.relativeMinutes) {
+      logger.info('Processing relative time reminder with input:', {
+        isRelative: result.schedule.isRelative,
+        relativeMinutes: result.schedule.relativeMinutes,
+        currentTime: DateTime.now().toISO()
+      });
 
-      // Format as HH:MM
-      result.schedule.time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-      result.schedule.date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-      result.schedule.frequency = 'once';
+      const now = DateTime.now();
+      const futureTime = now.plus({ minutes: result.schedule.relativeMinutes });
+
+      // Keep isRelative flag and relativeMinutes
+      result.schedule = {
+        ...result.schedule,
+        frequency: 'once',
+        time: futureTime.toFormat('HH:mm'),
+        date: futureTime.toFormat('yyyy-MM-dd'),
+        isRelative: true // Ensure isRelative is preserved
+      };
+
+      logger.info('Processed relative time reminder:', {
+        originalMinutes: result.schedule.relativeMinutes,
+        calculatedTime: result.schedule.time,
+        calculatedDate: result.schedule.date,
+        futureTimeISO: futureTime.toISO(),
+        schedule: result.schedule
+      });
     }
 
     return result;
   } catch (error) {
-    logger.error('OpenAI API error:', error);
-    throw new Error('Failed to analyze message');
+    logger.error('Error analyzing message with OpenAI:', error);
+    return null;
+  }
+}
+
+/**
+ * Detects timezone from a location message
+ * @param {string} message - User message with location
+ * @param {string} chatId - Chat ID
+ * @returns {Promise<string|null>} - Detected timezone or null
+ */
+async function detectTimezone(message, chatId) {
+  try {
+    const response = await openai.chat.completions.create({
+      model: config.OPENAI_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content: `You are a timezone detection assistant. Your task is to analyze messages and extract IANA timezone identifiers.
+            Return only the IANA timezone identifier (e.g., "Europe/London", "America/New_York") if you can detect one.
+            Return null if you cannot confidently determine the timezone.
+            Be conservative - only return a timezone if you're very confident it's correct.`
+        },
+        {
+          role: 'user',
+          content: message
+        }
+      ],
+      temperature: 0,
+      max_tokens: 50
+    });
+
+    const result = response.choices[0].message.content.trim();
+    return result === 'null' ? null : result;
+  } catch (error) {
+    logger.error('Error detecting timezone with OpenAI:', error);
+    return null;
   }
 }
 
 module.exports = {
-  analyzeMessage
+  analyzeMessage,
+  detectTimezone,
+  openai
 };

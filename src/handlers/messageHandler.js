@@ -11,6 +11,22 @@ const config = require('../config');
 async function getDateFromSchedule(schedule, userTimezone) {
   // Use Luxon for better timezone handling
   const now = DateTime.now().setZone(userTimezone);
+  logger.info('Getting date from schedule:', {
+    schedule,
+    userTimezone,
+    currentTime: now.toISO()
+  });
+
+  // For relative time reminders, calculate from current time
+  if (schedule.isRelative && schedule.relativeMinutes) {
+    const reminderDate = now.plus({ minutes: schedule.relativeMinutes });
+    logger.info('Calculated relative time:', {
+      relativeMinutes: schedule.relativeMinutes,
+      fromTime: now.toISO(),
+      calculatedTime: reminderDate.toISO()
+    });
+    return reminderDate.toJSDate();
+  }
 
   if (schedule.frequency === 'once' && schedule.date) {
     // Parse date and time
@@ -22,8 +38,12 @@ async function getDateFromSchedule(schedule, userTimezone) {
       year, month, day, hour: hours, minute: minutes
     }, { zone: userTimezone });
 
-    // Verify reminder is in the future
+    // Verify it's in the future
     if (reminderDate <= now) {
+      logger.info('Reminder time is in the past:', {
+        reminderTime: reminderDate.toISO(),
+        currentTime: now.toISO()
+      });
       return null; // Past time, can't set reminder
     }
 
@@ -94,12 +114,17 @@ async function getDateFromSchedule(schedule, userTimezone) {
     }
   }
 
+  logger.info('Calculated reminder date:', {
+    frequency: schedule.frequency,
+    calculatedTime: reminderDate.toISO()
+  });
+
   return reminderDate.toJSDate();
 }
 
 // Helper function to handle multiple days reminders
-async function handleMultipleDaysReminder(ctx, analysis, userTimezone) {
-  const userId = ctx.from.id.toString();
+async function handleMultipleDaysReminder(ctx, analysis, chatTimezone) {
+  const chatId = ctx.chat.id.toString();
   const reminderIds = [];
   const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -113,7 +138,7 @@ async function handleMultipleDaysReminder(ctx, analysis, userTimezone) {
     };
 
     // Calculate next run
-    const now = DateTime.now().setZone(userTimezone);
+    const now = DateTime.now().setZone(chatTimezone);
     const [hours, minutes] = analysis.schedule.time.split(':').map(Number);
 
     let reminderDate = now.set({ hour: hours, minute: minutes, second: 0, millisecond: 0 });
@@ -135,11 +160,11 @@ async function handleMultipleDaysReminder(ctx, analysis, userTimezone) {
       schedule: singleDaySchedule,
       nextRun: reminderDate.toJSDate().toISOString(),
       createdAt: new Date().toISOString(),
-      timezone: userTimezone
+      timezone: chatTimezone
     };
 
     // Save to Redis
-    const reminderId = await saveReminder(userId, reminder);
+    const reminderId = await saveReminder(chatId, reminder);
     reminderIds.push({ id: reminderId, day: days[dayOfWeek], nextRun: reminderDate });
   }
 
@@ -158,7 +183,7 @@ async function handleMultipleDaysReminder(ctx, analysis, userTimezone) {
     confirmationMsg += `  Next: ${reminder.nextRun.toLocaleString(DateTime.DATETIME_SHORT)}\n`;
   }
 
-  confirmationMsg += `\nTimezone: ${userTimezone}`;
+  confirmationMsg += `\nTimezone: ${chatTimezone}`;
 
   // Send confirmation
   await ctx.reply(confirmationMsg);
@@ -226,9 +251,18 @@ async function detectTimezone(message, userId) {
  */
 const messageHandler = async (ctx) => {
   const messageText = ctx.message.text;
-  const userId = ctx.from.id.toString();
+  const chatId = ctx.chat.id.toString();
 
-  logger.info(`Received message from user ${userId}: ${messageText}`);
+  // Get current time in different formats for debugging
+  const nowUtc = DateTime.utc();
+  const nowLocal = DateTime.local();
+  const debugTimeInfo = `
+🕒 Debug Time Info:
+UTC: ${nowUtc.toFormat('yyyy-MM-dd HH:mm:ss')}
+Local: ${nowLocal.toFormat('yyyy-MM-dd HH:mm:ss')}
+Timestamp: ${Date.now()}`;
+
+  logger.info(`Received message from chat ${chatId}: ${messageText}${debugTimeInfo}`);
 
   // Skip handling commands
   if (messageText.startsWith('/')) {
@@ -237,23 +271,27 @@ const messageHandler = async (ctx) => {
 
   try {
     // Check if we're in timezone detection mode
-    const expectingTimezone = await redisClient.get(`user:${userId}:expecting_timezone`);
+    const expectingTimezone = await redisClient.get(`chat:${chatId}:expecting_timezone`);
 
     if (expectingTimezone === 'true') {
       // Try to detect timezone from this message specifically
-      const timezone = await detectTimezone(messageText, userId);
+      const timezone = await detectTimezone(messageText, chatId);
 
       if (timezone) {
         // Clear the flag
-        await redisClient.del(`user:${userId}:expecting_timezone`);
+        await redisClient.del(`chat:${chatId}:expecting_timezone`);
 
         // Get current time in that timezone
-        const localTime = DateTime.now().setZone(timezone).toFormat('yyyy-MM-dd HH:mm:ss');
+        const localTime = DateTime.now().setZone(timezone);
 
-        await ctx.reply(`✅ I've set your timezone to ${timezone}.\nYour local time should be: ${localTime}`);
+        await ctx.reply(
+          `✅ I've set your timezone to ${timezone}.\n` +
+          `Your local time should be: ${localTime.toFormat('yyyy-MM-dd HH:mm:ss')}\n` +
+          debugTimeInfo
+        );
 
         // Offer to update existing reminders
-        const reminders = await redisClient.hGetAll(`reminders:${userId}`);
+        const reminders = await redisClient.hGetAll(`reminders:${chatId}`);
 
         if (reminders && Object.keys(reminders).length > 0) {
           await ctx.reply(`You have ${Object.keys(reminders).length} existing reminders. Would you like me to update them to use your new timezone?`, {
@@ -272,61 +310,71 @@ const messageHandler = async (ctx) => {
 
         return;
       } else {
-        await ctx.reply("I couldn't detect a timezone from that message. Please try again with a city or country name, or use the /timezone command to set it directly.");
+        await ctx.reply(
+          "I couldn't detect a timezone from that message. Please try again with a city or country name, or use the /timezone command to set it directly.\n" +
+          debugTimeInfo
+        );
         return;
       }
     }
 
+    // Get chat's timezone
+    const chatTimezone = await getUserTimezone(chatId);
+    const nowInChatTz = DateTime.now().setZone(chatTimezone);
+    logger.info(`Processing with chat timezone ${chatTimezone}, current time there: ${nowInChatTz.toFormat('yyyy-MM-dd HH:mm:ss')}`);
+
     // Process message with OpenAI
-    const analysis = await analyzeMessage(messageText, userId);
+    const analysis = await analyzeMessage(messageText, chatId);
 
     // If not a reminder request, ignore
     if (!analysis || !analysis.isReminder) {
       return;
     }
 
-    // Get user's timezone or use detected timezone
-    let userTimezone;
-    if (analysis.detectedTimezone) {
-      userTimezone = analysis.detectedTimezone;
-      // Already saved in detectTimezone
-    } else {
-      userTimezone = await getUserTimezone(userId);
-    }
-
     // Handle multiple days scenario if needed
     if (analysis.schedule.frequency === 'multiple_days') {
-      await handleMultipleDaysReminder(ctx, analysis, userTimezone);
+      await handleMultipleDaysReminder(ctx, analysis, chatTimezone);
       return;
     }
 
     // Create reminder object
-    const nextRun = await getDateFromSchedule(analysis.schedule, userTimezone);
+    const nextRun = await getDateFromSchedule(analysis.schedule, chatTimezone);
+    logger.info(`Calculated next run time: ${nextRun ? new Date(nextRun).toISOString() : 'null'}`);
 
     if (!nextRun || nextRun < new Date()) {
       // If time is in the past, suggest scheduling for tomorrow
       if (analysis.schedule.frequency === 'once') {
         // Store the reminder data in Redis temporarily instead of in the button
-        const rescheduleKey = `reschedule:${userId}:${Date.now()}`;
+        const rescheduleKey = `reschedule:${chatId}:${Date.now()}`;
         await redisClient.set(rescheduleKey, JSON.stringify({
           message: analysis.message,
           time: analysis.schedule.time
         }), { EX: 300 }); // Expire after 5 minutes
 
-        return ctx.reply("That time has already passed. Would you like to set this reminder for tomorrow at the same time?", {
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: "Yes, set for tomorrow", callback_data: `reschedule_${rescheduleKey}` }
-              ],
-              [
-                { text: "No, cancel", callback_data: "cancel_reminder" }
+        return ctx.reply(
+          "That time has already passed. Would you like to set this reminder for tomorrow at the same time?\n" +
+          `Current time in ${chatTimezone}: ${nowInChatTz.toFormat('yyyy-MM-dd HH:mm:ss')}\n` +
+          `Requested time: ${analysis.schedule.time}\n` +
+          debugTimeInfo,
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: "Yes, set for tomorrow", callback_data: `reschedule_${rescheduleKey}` }
+                ],
+                [
+                  { text: "No, cancel", callback_data: "cancel_reminder" }
+                ]
               ]
-            ]
+            }
           }
-        });
+        );
       } else {
-        return ctx.reply("I couldn't set that reminder. Please specify a future time.");
+        return ctx.reply(
+          "I couldn't set that reminder. Please specify a future time.\n" +
+          `Current time in ${chatTimezone}: ${nowInChatTz.toFormat('yyyy-MM-dd HH:mm:ss')}\n` +
+          debugTimeInfo
+        );
       }
     }
 
@@ -336,17 +384,17 @@ const messageHandler = async (ctx) => {
       schedule: analysis.schedule,
       nextRun: nextRun.toISOString(),
       createdAt: new Date().toISOString(),
-      timezone: userTimezone // Store timezone with reminder
+      timezone: chatTimezone // Store timezone with reminder
     };
 
     // Save to Redis
-    const reminderId = await saveReminder(userId, reminder);
+    const reminderId = await saveReminder(chatId, reminder);
 
     // Format confirmation message
     let confirmationMsg = `✅ Reminder set: "${analysis.message}"\n`;
 
-    // Format time in user's timezone
-    const reminderTime = DateTime.fromJSDate(nextRun).setZone(userTimezone);
+    // Format time in chat's timezone
+    const reminderTime = DateTime.fromJSDate(nextRun).setZone(chatTimezone);
 
     switch (analysis.schedule.frequency) {
       case 'once':
@@ -370,15 +418,20 @@ const messageHandler = async (ctx) => {
 
     confirmationMsg += `\n\nNext reminder: ${reminderTime.toLocaleString(DateTime.DATETIME_FULL)}`;
     confirmationMsg += `\nReminder ID: ${reminderId}`;
-    confirmationMsg += `\nTimezone: ${userTimezone}`;
+    confirmationMsg += `\nTimezone: ${chatTimezone}`;
+    confirmationMsg += `\n\nCurrent time in ${chatTimezone}: ${nowInChatTz.toFormat('yyyy-MM-dd HH:mm:ss')}`;
+    confirmationMsg += debugTimeInfo;
 
     // Send confirmation
     await ctx.reply(confirmationMsg);
-    logger.info(`Created reminder ${reminderId} for user ${userId} with timezone ${userTimezone}`);
+    logger.info(`Created reminder ${reminderId} for chat ${chatId} with timezone ${chatTimezone}. Next run: ${nextRun.toISOString()}`);
 
   } catch (error) {
     logger.error('Error handling message:', error);
-    await ctx.reply("I'm having trouble understanding that request. Could you try again with a clearer reminder format?");
+    await ctx.reply(
+      "I'm having trouble understanding that request. Could you try again with a clearer reminder format?\n" +
+      debugTimeInfo
+    );
   }
 };
 

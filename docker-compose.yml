@@ -12,9 +12,9 @@ services:
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
       - REDIS_URL=redis://redis:6379
-      - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-Europe/Moscow}
+      - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-UTC}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     volumes:
       - ./logs:/app/logs
