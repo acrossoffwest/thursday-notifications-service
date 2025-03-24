@@ -135,12 +135,11 @@ async function setupScheduler(bot) {
           // Format the reminder time in chat's timezone
           const chatTimezone = reminder.timezone || await getUserTimezone(chatId);
           const reminderTime = DateTime.fromJSDate(new Date(reminder.nextRun))
-              .setZone(chatTimezone)
-              .toLocaleString(DateTime.TIME_SIMPLE);
+              .setZone(chatTimezone);
 
           // Send the reminder with properly formatted time
           await bot.telegram.sendMessage(chatId, `⏰ Reminder: ${reminder.message}`);
-          logger.info(`Sent reminder ${reminderId} to chat ${chatId} at ${reminderTime} (${chatTimezone})`);
+          logger.info(`Sent reminder ${reminderId} to chat ${chatId} at ${reminderTime.toFormat('HH:mm')} (${chatTimezone})`);
 
           // Calculate next run time
           const nextRun = calculateNextRun(reminder);

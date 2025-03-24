@@ -173,14 +173,14 @@ async function handleMultipleDaysReminder(ctx, analysis, chatTimezone) {
 
   // List days
   const dayNames = analysis.schedule.daysOfWeek.map(d => days[d]).join(' and ');
-  confirmationMsg += `📆 Every ${dayNames} at ${analysis.schedule.time}\n\n`;
+  confirmationMsg += `📆 Every ${dayNames} at ${analysis.schedule.time} ${chatTimezone}\n\n`;
 
   // List individual reminders
   confirmationMsg += `Reminders created:\n`;
 
   for (const reminder of reminderIds) {
     confirmationMsg += `• ${reminder.day}: ID ${reminder.id}\n`;
-    confirmationMsg += `  Next: ${reminder.nextRun.toLocaleString(DateTime.DATETIME_SHORT)}\n`;
+    confirmationMsg += `  Next: ${reminder.nextRun.toFormat('MMMM d, yyyy HH:mm')} ${chatTimezone}\n`;
   }
 
   confirmationMsg += `\nTimezone: ${chatTimezone}`;
@@ -194,41 +194,51 @@ async function handleMultipleDaysReminder(ctx, analysis, chatTimezone) {
 async function detectTimezone(message, userId) {
   try {
     const openai = require('../services/openai').openai;
-    const response = await openai.chat.completions.create({
-      model: config.OPENAI_MODEL,
-      messages: [
-        {
-          role: 'system',
-          content: `
-          You are a multilingual timezone detection assistant. Extract location or timezone information from the message in any language.
-          
-          If the message explicitly mentions a timezone or city/location, determine the IANA timezone.
-          
-          For example:
-          - "по варшавскому времени" should be detected as "Europe/Warsaw"
-          - "remind me at 5pm Berlin time" should be detected as "Europe/Berlin"
-          - "Tokyo time" should be detected as "Asia/Tokyo"
-          
-          Return your response as JSON with the following structure:
-          {
-            "hasTimezoneInfo": boolean, // true if the message contains timezone information
-            "location": string, // the detected location (city, country, etc.)
-            "timezone": string, // the IANA timezone string (e.g., "Europe/Moscow", "America/New_York")
-            "confidence": number // 0-1 value indicating confidence in the timezone detection
-          }
-          
-          If no timezone or location is mentioned, set hasTimezoneInfo to false and other fields to null.
-          Only return valid IANA timezone strings for the timezone field.
-          `
-        },
-        {
-          role: 'user',
-          content: message
-        }
-      ],
-      temperature: 0,
-      response_format: { type: 'json_object' }
+    
+    // Create a promise that rejects after 10 seconds
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Timezone detection timed out')), 10000);
     });
+
+    // Race between the API call and the timeout
+    const response = await Promise.race([
+      openai.chat.completions.create({
+        model: config.OPENAI_MODEL,
+        messages: [
+          {
+            role: 'system',
+            content: `
+            You are a multilingual timezone detection assistant. Extract location or timezone information from the message in any language.
+            
+            If the message explicitly mentions a timezone or city/location, determine the IANA timezone.
+            
+            For example:
+            - "по варшавскому времени" should be detected as "Europe/Warsaw"
+            - "remind me at 5pm Berlin time" should be detected as "Europe/Berlin"
+            - "Tokyo time" should be detected as "Asia/Tokyo"
+            
+            Return your response as JSON with the following structure:
+            {
+              "hasTimezoneInfo": boolean, // true if the message contains timezone information
+              "location": string, // the detected location (city, country, etc.)
+              "timezone": string, // the IANA timezone string (e.g., "Europe/Moscow", "America/New_York")
+              "confidence": number // 0-1 value indicating confidence in the timezone detection
+            }
+            
+            If no timezone or location is mentioned, set hasTimezoneInfo to false and other fields to null.
+            Only return valid IANA timezone strings for the timezone field.
+            `
+          },
+          {
+            role: 'user',
+            content: message
+          }
+        ],
+        temperature: 0,
+        response_format: { type: 'json_object' }
+      }),
+      timeoutPromise
+    ]);
 
     const result = JSON.parse(response.choices[0].message.content);
     logger.debug('Timezone detection result:', result);
@@ -242,16 +252,42 @@ async function detectTimezone(message, userId) {
     return null;
   } catch (error) {
     logger.error('Error detecting timezone:', error);
+    if (error.message === 'Timezone detection timed out') {
+      logger.warn('Timezone detection timed out after 10 seconds');
+    }
     return null;
   }
 }
 
+// Helper to check if message should be processed
+async function shouldProcessMessage(ctx, messageText) {
+  // Always process private chats
+  if (ctx.chat.type === 'private') {
+    return { shouldProcess: true, cleanMessage: messageText };
+  }
+
+  // Get bot info for mention check
+  const botInfo = await ctx.telegram.getMe();
+  const botUsername = botInfo.username;
+  const mentionRegex = new RegExp(`@${botUsername}\\b`, 'i');
+
+  // Check for bot mention in group chats
+  if (!mentionRegex.test(messageText)) {
+    logger.debug('Bot not mentioned in group chat, skipping message');
+    return { shouldProcess: false, cleanMessage: null };
+  }
+
+  // Remove bot mention and clean the message
+  const cleanMessage = messageText.replace(mentionRegex, '').trim();
+  return { shouldProcess: true, cleanMessage };
+}
+
 /**
- * Handles incoming user messages
+ * Handles /remind command
  */
-const messageHandler = async (ctx) => {
-  const messageText = ctx.message.text;
+const remindCommandHandler = async (ctx) => {
   const chatId = ctx.chat.id.toString();
+  const messageText = ctx.message.text.substring(7).trim(); // Remove "/remind "
 
   // Get current time in different formats for debugging
   const nowUtc = DateTime.utc();
@@ -262,72 +298,48 @@ UTC: ${nowUtc.toFormat('yyyy-MM-dd HH:mm:ss')}
 Local: ${nowLocal.toFormat('yyyy-MM-dd HH:mm:ss')}
 Timestamp: ${Date.now()}`;
 
-  logger.info(`Received message from chat ${chatId}: ${messageText}${debugTimeInfo}`);
+  logger.info(`Received /remind command from chat ${chatId}: ${messageText}${debugTimeInfo}`);
 
-  // Skip handling commands
-  if (messageText.startsWith('/')) {
+  if (!messageText) {
+    await ctx.reply(
+      "Please provide a reminder message. Examples:\n" +
+      "- /remind drink water in 5 minutes\n" +
+      "- /remind take medicine every day at 9am\n" +
+      "- /remind exercise every Monday and Wednesday at 3pm\n" +
+      "- /remind team meeting every month on day 15 at 14:00"
+    );
     return;
   }
 
   try {
-    // Check if we're in timezone detection mode
-    const expectingTimezone = await redisClient.get(`chat:${chatId}:expecting_timezone`);
-
-    if (expectingTimezone === 'true') {
-      // Try to detect timezone from this message specifically
-      const timezone = await detectTimezone(messageText, chatId);
-
-      if (timezone) {
-        // Clear the flag
-        await redisClient.del(`chat:${chatId}:expecting_timezone`);
-
-        // Get current time in that timezone
-        const localTime = DateTime.now().setZone(timezone);
-
-        await ctx.reply(
-          `✅ I've set your timezone to ${timezone}.\n` +
-          `Your local time should be: ${localTime.toFormat('yyyy-MM-dd HH:mm:ss')}\n` +
-          debugTimeInfo
-        );
-
-        // Offer to update existing reminders
-        const reminders = await redisClient.hGetAll(`reminders:${chatId}`);
-
-        if (reminders && Object.keys(reminders).length > 0) {
-          await ctx.reply(`You have ${Object.keys(reminders).length} existing reminders. Would you like me to update them to use your new timezone?`, {
-            reply_markup: {
-              inline_keyboard: [
-                [
-                  { text: "Yes, update all reminders", callback_data: `update_tz_all` }
-                ],
-                [
-                  { text: "No, keep current times", callback_data: `update_tz_none` }
-                ]
-              ]
-            }
-          });
-        }
-
-        return;
-      } else {
-        await ctx.reply(
-          "I couldn't detect a timezone from that message. Please try again with a city or country name, or use the /timezone command to set it directly.\n" +
-          debugTimeInfo
-        );
-        return;
-      }
+    // Check if user has a timezone set
+    const chatTimezone = await getUserTimezone(chatId);
+    
+    if (!chatTimezone) {
+      await ctx.reply(
+        "Before I can set reminders, I need to know your timezone. Please:\n\n" +
+        "1. Use /timezone command (e.g., /timezone Europe/Moscow)\n" +
+        "This helps me set reminders at the correct time for you."
+      );
+      return;
     }
 
-    // Get chat's timezone
-    const chatTimezone = await getUserTimezone(chatId);
+    // Get chat's timezone for reminder processing
     const nowInChatTz = DateTime.now().setZone(chatTimezone);
     logger.info(`Processing with chat timezone ${chatTimezone}, current time there: ${nowInChatTz.toFormat('yyyy-MM-dd HH:mm:ss')}`);
 
     // Process message with OpenAI
     const analysis = await analyzeMessage(messageText, chatId);
 
-    // If not a reminder request, ignore
+    // If not a valid reminder request, show help
     if (!analysis || !analysis.isReminder) {
+      await ctx.reply(
+        "I couldn't understand that reminder format. Please try again with one of these formats:\n" +
+        "- /remind drink water in 5 minutes\n" +
+        "- /remind take medicine every day at 9am\n" +
+        "- /remind exercise every Monday and Wednesday at 3pm\n" +
+        "- /remind team meeting every month on day 15 at 14:00"
+      );
       return;
     }
 
@@ -344,7 +356,7 @@ Timestamp: ${Date.now()}`;
     if (!nextRun || nextRun < new Date()) {
       // If time is in the past, suggest scheduling for tomorrow
       if (analysis.schedule.frequency === 'once') {
-        // Store the reminder data in Redis temporarily instead of in the button
+        // Store the reminder data in Redis temporarily
         const rescheduleKey = `reschedule:${chatId}:${Date.now()}`;
         await redisClient.set(rescheduleKey, JSON.stringify({
           message: analysis.message,
@@ -354,8 +366,7 @@ Timestamp: ${Date.now()}`;
         return ctx.reply(
           "That time has already passed. Would you like to set this reminder for tomorrow at the same time?\n" +
           `Current time in ${chatTimezone}: ${nowInChatTz.toFormat('yyyy-MM-dd HH:mm:ss')}\n` +
-          `Requested time: ${analysis.schedule.time}\n` +
-          debugTimeInfo,
+          `Requested time: ${analysis.schedule.time}`,
           {
             reply_markup: {
               inline_keyboard: [
@@ -372,8 +383,7 @@ Timestamp: ${Date.now()}`;
       } else {
         return ctx.reply(
           "I couldn't set that reminder. Please specify a future time.\n" +
-          `Current time in ${chatTimezone}: ${nowInChatTz.toFormat('yyyy-MM-dd HH:mm:ss')}\n` +
-          debugTimeInfo
+          `Current time in ${chatTimezone}: ${nowInChatTz.toFormat('yyyy-MM-dd HH:mm:ss')}`
         );
       }
     }
@@ -384,7 +394,7 @@ Timestamp: ${Date.now()}`;
       schedule: analysis.schedule,
       nextRun: nextRun.toISOString(),
       createdAt: new Date().toISOString(),
-      timezone: chatTimezone // Store timezone with reminder
+      timezone: chatTimezone
     };
 
     // Save to Redis
@@ -398,44 +408,114 @@ Timestamp: ${Date.now()}`;
 
     switch (analysis.schedule.frequency) {
       case 'once':
-        confirmationMsg += `📅 Date: ${reminderTime.toLocaleString(DateTime.DATE_FULL)}\n`;
-        confirmationMsg += `⏰ Time: ${reminderTime.toLocaleString(DateTime.TIME_SIMPLE)}`;
+        confirmationMsg += `📅 Date: ${reminderTime.toFormat('MMMM d, yyyy')}\n`;
+        confirmationMsg += `⏰ Time: ${reminderTime.toFormat('HH:mm')} ${chatTimezone}`;
         break;
 
       case 'daily':
-        confirmationMsg += `📆 Every day at ${analysis.schedule.time}`;
+        confirmationMsg += `📆 Every day at ${analysis.schedule.time} ${chatTimezone}`;
         break;
 
       case 'weekly':
         const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-        confirmationMsg += `📆 Every ${days[analysis.schedule.dayOfWeek]} at ${analysis.schedule.time}`;
+        confirmationMsg += `📆 Every ${days[analysis.schedule.dayOfWeek]} at ${analysis.schedule.time} ${chatTimezone}`;
         break;
 
       case 'monthly':
-        confirmationMsg += `📆 Every month on day ${analysis.schedule.dayOfMonth} at ${analysis.schedule.time}`;
+        confirmationMsg += `📆 Every month on day ${analysis.schedule.dayOfMonth} at ${analysis.schedule.time} ${chatTimezone}`;
         break;
     }
 
-    confirmationMsg += `\n\nNext reminder: ${reminderTime.toLocaleString(DateTime.DATETIME_FULL)}`;
+    confirmationMsg += `\n\nNext reminder: ${reminderTime.toFormat('MMMM d, yyyy HH:mm')} ${chatTimezone}`;
     confirmationMsg += `\nReminder ID: ${reminderId}`;
     confirmationMsg += `\nTimezone: ${chatTimezone}`;
     confirmationMsg += `\n\nCurrent time in ${chatTimezone}: ${nowInChatTz.toFormat('yyyy-MM-dd HH:mm:ss')}`;
-    confirmationMsg += debugTimeInfo;
 
     // Send confirmation
     await ctx.reply(confirmationMsg);
     logger.info(`Created reminder ${reminderId} for chat ${chatId} with timezone ${chatTimezone}. Next run: ${nextRun.toISOString()}`);
 
   } catch (error) {
-    logger.error('Error handling message:', error);
+    logger.error('Error handling /remind command:', error);
     await ctx.reply(
-      "I'm having trouble understanding that request. Could you try again with a clearer reminder format?\n" +
-      debugTimeInfo
+      "I'm having trouble setting that reminder. Please try again with a clearer format:\n" +
+      "- /remind drink water in 5 minutes\n" +
+      "- /remind take medicine every day at 9am\n" +
+      "- /remind exercise every Monday and Wednesday at 3pm"
+    );
+  }
+};
+
+/**
+ * Handles /timezone command
+ */
+const timezoneCommandHandler = async (ctx) => {
+  const chatId = ctx.chat.id.toString();
+  const timezone = ctx.message.text.substring(9).trim(); // Remove "/timezone "
+
+  if (!timezone) {
+    await ctx.reply(
+      "Please provide a timezone. Examples:\n" +
+      "- /timezone Europe/Warsaw\n" +
+      "- /timezone Moscow\n" +
+      "- /timezone New York\n" +
+      "- /timezone Tokyo\n\n" +
+      "You can use city names or standard timezone formats.\n" +
+      "I'll help you find the correct timezone format!"
+    );
+    return;
+  }
+
+  try {
+    // Validate and normalize timezone using OpenAI
+    const { validateTimezone } = require('../services/openai');
+    const validation = await validateTimezone(timezone);
+
+    if (!validation.isValid || !validation.suggestedTimezone) {
+      await ctx.reply(
+        "I couldn't determine your timezone. Please try:\n" +
+        "1. Using a major city name (e.g., Moscow, New York, Tokyo)\n" +
+        "2. Using the standard format (e.g., Europe/Warsaw, America/New_York)\n\n" +
+        "You can find your timezone here: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones"
+      );
+      return;
+    }
+
+    // If input wasn't exact, show what we're using
+    let confirmationPrefix = "";
+    if (validation.originalInput !== validation.suggestedTimezone) {
+      confirmationPrefix = `I understood "${validation.originalInput}" as "${validation.suggestedTimezone}"\n${validation.explanation}\n\n`;
+    }
+
+    // Save the normalized timezone
+    await saveUserTimezone(chatId, validation.suggestedTimezone);
+
+    // Get current time in new timezone
+    const localTime = DateTime.now().setZone(validation.suggestedTimezone);
+
+    await ctx.reply(
+      confirmationPrefix +
+      `✅ Timezone set to ${validation.suggestedTimezone}\n` +
+      `Your local time should be: ${localTime.toFormat('yyyy-MM-dd HH:mm:ss')}\n\n` +
+      `You can now create reminders using the /remind command. For example:\n` +
+      `- /remind drink water in 5 minutes\n` +
+      `- /remind take medicine every day at 9am\n` +
+      `- /remind exercise every Monday and Wednesday at 3pm`
+    );
+
+  } catch (error) {
+    logger.error('Error handling /timezone command:', error);
+    await ctx.reply(
+      "Sorry, there was an error setting your timezone. Please try again with a city name or standard timezone format.\n" +
+      "Examples:\n" +
+      "- /timezone Moscow\n" +
+      "- /timezone Europe/Warsaw\n" +
+      "- /timezone New York"
     );
   }
 };
 
 module.exports = {
-  messageHandler,
-  detectTimezone
+  remindCommandHandler,
+  timezoneCommandHandler
 };

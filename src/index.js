@@ -2,19 +2,33 @@
 
 // Main application entry point
 const { Telegraf } = require('telegraf');
-const { messageHandler, detectTimezone } = require('./handlers/messageHandler');
-const { setupScheduler, calculateNextRun } = require('./services/scheduler');
+const { remindCommandHandler, timezoneCommandHandler } = require('./handlers/messageHandler');
+const { setupScheduler } = require('./services/scheduler');
 const { redisClient, saveUserTimezone, getUserTimezone, saveReminder } = require('./services/redis');
-const { transcribeVoiceMessage } = require('./services/speech');
 const config = require('./config');
 const logger = require('./utils/logger');
 const { DateTime } = require('luxon');
-const axios = require('axios');
 
 // Initialize bot
 const bot = new Telegraf(config.TELEGRAM_BOT_TOKEN);
 
-// Connect to Redis
+// Register commands
+bot.command('remind', remindCommandHandler);
+bot.command('timezone', timezoneCommandHandler);
+
+// Set up command descriptions
+bot.telegram.setMyCommands([
+  {
+    command: 'remind',
+    description: 'Set a new reminder. Example: /remind drink water in 5 minutes'
+  },
+  {
+    command: 'timezone',
+    description: 'Set your timezone. Example: /timezone Europe/Moscow'
+  }
+]);
+
+// Connect to Redis and start bot
 (async () => {
   try {
     await redisClient.connect();
@@ -39,23 +53,23 @@ bot.command('start', async (ctx) => {
   // Check if timezone is set for this chat
   const chatTimezone = await getUserTimezone(chatId);
   const timezoneMessage = chatTimezone === config.USER_TIMEZONE_DEFAULT
-    ? "\n⚠️ IMPORTANT: Please set your timezone first using /timezone or /timezone_detect command."
+    ? "\n⚠️ IMPORTANT: Please set your timezone first using /timezone command."
     : `\n✅ Your timezone is set to: ${chatTimezone}`;
 
   ctx.reply(
       `Hello ${firstName}! 👋\n\n` +
       `I'm your personal reminder assistant powered by AI. I can understand natural language requests to set reminders.${timezoneMessage}\n\n` +
-      `Try saying something like:\n` +
-      `• "Remind me to call Alex tomorrow at 3pm"\n` +
-      `• "Set a reminder for gym every Monday and Wednesday at 6pm"\n` +
-      `• "Remind me to take medicine daily at 9am"\n\n` +
-      `You can also use these commands:\n` +
+      `Try these commands:\n` +
+      `/remind - Set a new reminder\n` +
       `/list - View all your active reminders\n` +
       `/delete [id] - Delete a specific reminder\n` +
       `/timezone - Set your timezone\n` +
-      `/timezone_detect - Detect your timezone from location\n` +
+      `/mytimezone - Check your current timezone\n` +
       `/help - Show more example commands\n\n` +
-      `What would you like me to remind you about?`
+      `Examples:\n` +
+      `• /remind drink water in 5 minutes\n` +
+      `• /remind take medicine every day at 9am\n` +
+      `• /remind exercise every Monday and Wednesday at 6pm`
   );
 });
 
@@ -71,32 +85,30 @@ bot.command('list', async (ctx) => {
     // Send each reminder as a separate message with delete button
     for (const [id, reminderJson] of Object.entries(reminders)) {
       const reminder = JSON.parse(reminderJson);
+      const timezone = reminder.timezone || await getUserTimezone(chatId);
+      const nextRunTime = DateTime.fromISO(reminder.nextRun).setZone(timezone);
 
       let message = `🔔 <b>${reminder.message}</b>\n\n`;
 
       switch (reminder.schedule.frequency) {
         case 'once':
-          message += `📅 Once on ${new Date(reminder.nextRun).toLocaleDateString()}\n`;
-          message += `⏰ At ${new Date(reminder.nextRun).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+          message += `📅 Once on ${nextRunTime.toFormat('MMMM d, yyyy')}\n`;
+          message += `⏰ At ${nextRunTime.toFormat('HH:mm')} ${timezone}`;
           break;
         case 'daily':
-          message += `📆 Every day at ${reminder.schedule.time}`;
+          message += `📆 Every day at ${reminder.schedule.time} ${timezone}`;
           break;
         case 'weekly':
           const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-          message += `📆 Every ${days[reminder.schedule.dayOfWeek]} at ${reminder.schedule.time}`;
+          message += `📆 Every ${days[reminder.schedule.dayOfWeek]} at ${reminder.schedule.time} ${timezone}`;
           break;
         case 'monthly':
-          message += `📆 Every month on day ${reminder.schedule.dayOfMonth} at ${reminder.schedule.time}`;
+          message += `📆 Every month on day ${reminder.schedule.dayOfMonth} at ${reminder.schedule.time} ${timezone}`;
           break;
       }
 
-      message += `\n\nNext reminder: ${new Date(reminder.nextRun).toLocaleString()}`;
-
-      if (reminder.timezone) {
-        message += `\nTimezone: ${reminder.timezone}`;
-      }
-
+      message += `\n\nNext reminder: ${nextRunTime.toFormat('MMMM d, yyyy HH:mm')} ${timezone}`;
+      message += `\nTimezone: ${timezone}`;
       message += `\nID: ${id}`;
 
       await ctx.replyWithHTML(message, {
@@ -167,80 +179,24 @@ bot.command('help', async (ctx) => {
   const chatId = ctx.chat.id.toString();
   const chatTimezone = await getUserTimezone(chatId);
   const timezoneMessage = chatTimezone === config.USER_TIMEZONE_DEFAULT
-    ? "\n⚠️ IMPORTANT: Please set your timezone first using /timezone or /timezone_detect command."
+    ? "\n⚠️ IMPORTANT: Please set your timezone first using /timezone command."
     : `\n✅ Your timezone is set to: ${chatTimezone}`;
 
   ctx.reply(
-      'I can help you set reminders using natural language.' + timezoneMessage + '\n\n' +
-      'Examples:\n' +
-      '• "Remind me to take medicine every day at 9am"\n' +
-      '• "Set a reminder for team meeting every Thursday at 3pm"\n' +
-      '• "Remind me to call mom on Sundays at 6pm"\n\n' +
-      'Commands:\n' +
+      'Here are the available commands:' + timezoneMessage + '\n\n' +
+      '/remind - Set a new reminder\n' +
+      '/timezone - Set your timezone\n' +
       '/list - Show all your active reminders\n' +
       '/delete [id] - Delete a specific reminder\n' +
-      '/timezone - Set your timezone\n' +
-      '/timezone_detect - Detect your timezone from location\n' +
       '/mytimezone - Check your current timezone\n' +
       '/help - Show this help message\n\n' +
+      'Example reminders:\n' +
+      '• /remind take medicine every day at 9am\n' +
+      '• /remind team meeting every Thursday at 3pm\n' +
+      '• /remind call mom on Sundays at 6pm\n' +
+      '• /remind drink water in 5 minutes\n\n' +
       'Note: Timezone is shared for all users in this chat to ensure consistent reminder times.'
   );
-});
-
-// Timezone command
-bot.command('timezone', async (ctx) => {
-  const messageText = ctx.message.text.trim();
-  const args = messageText.split(' ');
-  const chatId = ctx.chat.id.toString();
-
-  if (args.length < 2) {
-    return ctx.reply(
-        'You can set your timezone in two ways:\n\n' +
-        '1. Directly specify a timezone:\n' +
-        '/timezone Europe/Moscow\n\n' +
-        '2. Tell me your location:\n' +
-        'I live in Moscow, Russia\n' +
-        'My city is New York\n\n' +
-        'Find your timezone here: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones'
-    );
-  }
-
-  const timezone = args[1];
-
-  try {
-    // Validate timezone using Luxon
-    const testDate = DateTime.now().setZone(timezone);
-
-    if (!testDate.isValid) {
-      return ctx.reply('Invalid timezone. Please use a valid IANA timezone name like "Europe/Moscow".');
-    }
-
-    // Save the timezone
-    await saveUserTimezone(chatId, timezone);
-    const localTime = testDate.toFormat('yyyy-MM-dd HH:mm:ss');
-    ctx.reply(`✅ Your timezone has been set to ${timezone}.\nYour local time should be: ${localTime}`);
-  } catch (error) {
-    logger.error(`Error setting timezone for chat ${chatId}:`, error);
-    ctx.reply('Sorry, I could not set your timezone. Please try again.');
-  }
-});
-
-// Timezone detection command
-bot.command('timezone_detect', async (ctx) => {
-  const chatId = ctx.chat.id.toString();
-
-  try {
-    await ctx.reply('Please tell me your location so I can detect your timezone. For example: "I live in Warsaw, Poland" or "My timezone is Tokyo time"');
-
-    // Setting a flag in Redis to mark we're expecting a timezone response
-    await redisClient.set(`chat:${chatId}:expecting_timezone`, 'true', {
-      EX: 300 // Expire after 5 minutes if no response
-    });
-
-  } catch (error) {
-    logger.error(`Error in timezone_detect command: ${error}`);
-    await ctx.reply('Sorry, I encountered an error. Please try again later.');
-  }
 });
 
 // My timezone command
@@ -352,9 +308,9 @@ bot.action(/reschedule_(.+)/, async (ctx) => {
 
     // Confirm to user
     const confirmationMsg = `✅ Reminder rescheduled: "${reminderData.message}"\n` +
-        `📅 Date: ${reminderDate.toLocaleString(DateTime.DATE_FULL)}\n` +
-        `⏰ Time: ${reminderDate.toLocaleString(DateTime.TIME_SIMPLE)}\n\n` +
-        `Next reminder: ${reminderDate.toLocaleString(DateTime.DATETIME_FULL)}\n` +
+        `📅 Date: ${reminderDate.toFormat('MMMM d, yyyy')}\n` +
+        `⏰ Time: ${reminderDate.toFormat('HH:mm')} ${chatTimezone}\n\n` +
+        `Next reminder: ${reminderDate.toFormat('MMMM d, yyyy HH:mm')} ${chatTimezone}\n` +
         `Reminder ID: ${reminderId}\n` +
         `Timezone: ${chatTimezone}`;
 
@@ -369,43 +325,6 @@ bot.action(/reschedule_(.+)/, async (ctx) => {
 bot.action('cancel_reminder', async (ctx) => {
   await ctx.editMessageText("Reminder cancelled. You can set a new one anytime.");
 });
-
-// Handle voice messages
-bot.on(['voice', 'audio'], async (ctx) => {
-  const chatId = ctx.chat.id.toString();
-
-  try {
-    // Send a typing indicator while processing
-    await ctx.sendChatAction('typing');
-
-    // Get file ID
-    const fileId = ctx.message.voice ? ctx.message.voice.file_id : ctx.message.audio.file_id;
-
-    // Get file URL
-    const fileInfo = await ctx.telegram.getFile(fileId);
-    const fileUrl = `https://api.telegram.org/file/bot${config.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`;
-
-    // Transcribe voice message
-    const transcribedText = await transcribeVoiceMessage(fileUrl, chatId);
-
-    // First, respond with the transcription
-    await ctx.reply(`🎤 I heard: "${transcribedText}"`);
-
-    // Then process as a regular message by creating a fake context with the text
-    console.log(ctx);
-    ctx.message.text = transcribedText;
-    logger.info(`Transcribed text: ${transcribedText}`);
-    // Use the message handler to process the transcribed text
-    await messageHandler(ctx, () => {});
-    logger.info('Voice message processed successfully');
-  } catch (error) {
-    logger.error('Error handling voice message:', error);
-    await ctx.reply("I'm having trouble processing your voice message. Please try again or send your request as text.");
-  }
-});
-
-// Then handle regular messages
-bot.on('message', messageHandler);
 
 // Enable graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
